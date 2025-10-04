@@ -1,13 +1,9 @@
-use std::net::SocketAddr;
-
 use crate::trackers::TrackerResponse;
-use crate::peers::parse_peers;
-
 use super::Tracker;
 
 use anyhow::Result;
 use async_trait::async_trait;
-use url::{form_urlencoded::{self, parse}, Url};
+use url::form_urlencoded::{self};
 
 pub struct HttpTracker {
     pub url: String,

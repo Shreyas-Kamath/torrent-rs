@@ -1,8 +1,5 @@
 pub mod http;
 // pub mod udp;
-// pub mod https;
-
-use std::net::SocketAddr;
 
 // re-export
 pub use http::HttpTracker;

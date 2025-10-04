@@ -1,5 +1,3 @@
-use tokio::sync::Mutex;
-
 pub struct Piece {
     index: usize,
     data: Vec<u8>,

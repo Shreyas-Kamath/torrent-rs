@@ -1,15 +1,14 @@
 use std::net::{Ipv4Addr, SocketAddrV4, SocketAddr};
 
-use serde::Deserialize;
-use serde_bencode::{de, value::Value};
+use serde_bencode::value::Value;
 
-#[derive(Deserialize, Debug)]
-pub struct PeerDict {
-    pub ip: String,
-    pub port: u16,
-    #[serde(rename = "peer id")]
-    pub peer_id: String,
-}
+// #[derive(Deserialize, Debug)]
+// pub struct PeerDict {
+//     pub ip: String,
+//     pub port: u16,
+//     #[serde(rename = "peer id")]
+//     pub peer_id: String,
+// }
 
 pub struct Peer {
     pub addr: std::net::SocketAddr,
