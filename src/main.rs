@@ -6,9 +6,12 @@ use tokio::sync::Mutex;
 mod trackers;
 mod torrent;
 mod peers;
+mod pieces;
 
 use trackers::{Tracker, HttpTracker, TrackerResponse};
 use peers::{parse_peers, PeerConnection};
+
+use crate::pieces::piece_manager::PieceManager;
 
 type PeerPool = Arc<Mutex<HashSet<SocketAddr>>>;
 
@@ -18,6 +21,7 @@ async fn run_tracker(
     tracker: Box<dyn Tracker + Send + Sync>,
     info_hash: Arc<Vec<u8>>,
     peer_pool: PeerPool,
+    pm: Arc<Mutex<PieceManager>>
 ) -> anyhow::Result<()> {
         loop {
         let resp: TrackerResponse = tracker.announce(&info_hash).await?;
@@ -27,10 +31,11 @@ async fn run_tracker(
 
         for peer_addr in peers {
             if pool.insert(peer_addr) {
+                let pm_clone = pm.clone();
                 tokio::spawn({
                     let info_clone = info_hash.clone();
                     async move {
-                        if let Ok(conn) = PeerConnection::new(peer_addr, info_clone).await {
+                        if let Ok(conn) = PeerConnection::new(peer_addr, info_clone, pm_clone).await {
                             if let Err(e) = conn.start().await {
                                 eprintln!("Peer {} failed: {:?}", peer_addr, e);
                             }
@@ -52,6 +57,8 @@ async fn main() -> anyhow::Result<()> {
 
     let peer_pool: PeerPool = Arc::new(Mutex::new(HashSet::new()));
 
+    let pm = Arc::new(Mutex::new(PieceManager::new(torrent.info.piece_length, torrent.total_length(), &torrent.info.pieces)));
+
     let tracker_objs: Vec<Box<dyn Tracker + Send + Sync>> = torrent
         .announce_list
         .iter()
@@ -65,8 +72,9 @@ async fn main() -> anyhow::Result<()> {
         let info_clone = Arc::clone(&info_hash_vec);
         let pool_clone = Arc::clone(&peer_pool);
 
+        let pm_clone = pm.clone();
         tokio::spawn(async move {
-            if let Err(e) = run_tracker(tracker, info_clone, pool_clone).await {
+            if let Err(e) = run_tracker(tracker, info_clone, pool_clone, pm_clone).await {
                 eprintln!("Tracker task failed: {:?}", e);
             }
         });

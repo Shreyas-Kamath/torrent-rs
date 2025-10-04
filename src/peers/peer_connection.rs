@@ -1,7 +1,9 @@
 use crate::peers::peer::Peer;
+use crate::pieces::piece_manager::PieceManager;
 use std::sync::Arc;
 use anyhow::Ok;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::sync::Mutex;
 
 pub struct PeerConnection {
     peer: Peer,
@@ -19,11 +21,13 @@ pub struct PeerConnection {
     // states
     am_choked: bool,
     peer_choked: bool,
-    am_interested: bool
+    am_interested: bool,
+
+    piece_manager: Arc<Mutex<PieceManager>>
 }
 
 impl PeerConnection {
-    pub async fn new(peer_addr: std::net::SocketAddr, info_hash: Arc<Vec<u8>>) -> anyhow::Result<Self> {
+    pub async fn new(peer_addr: std::net::SocketAddr, info_hash: Arc<Vec<u8>>, pm: Arc<Mutex<PieceManager>>) -> anyhow::Result<Self> {
         let peer = Peer::new(peer_addr);
         let stream = tokio::net::TcpStream::connect(peer_addr).await?;
         let bitfield = vec![];
@@ -43,6 +47,7 @@ impl PeerConnection {
             am_choked: true,
             peer_choked: true,
             am_interested: false,
+            piece_manager: pm.clone(),
         })
     }
 
@@ -70,12 +75,12 @@ impl PeerConnection {
         self.handshake_buf[1..20].copy_from_slice(b"BitTorrent protocol");
         self.handshake_buf[20..28].fill(0);
         self.handshake_buf[28..48].copy_from_slice(&self.info_hash);
-        self.handshake_buf[48..68].copy_from_slice(&self.peer_id.as_bytes());
+        self.handshake_buf[48..68].copy_from_slice(self.peer_id.as_bytes());
 
         self.stream.write_all(&self.handshake_buf).await?;
         self.stream.read_exact(&mut self.handshake_buf).await?;
 
-        if &self.handshake_buf[28..48] != &self.info_hash[..] {
+        if self.handshake_buf[28..48] != self.info_hash[..] {
             return Err(anyhow::anyhow!("Info hash mismatch"));
         }
         Ok(())
@@ -124,13 +129,13 @@ impl PeerConnection {
             }
 
             4 => {
-                println!("{} downloaded a new piece", self.peer.addr);
-                todo!("handle piece");
+                println!("{} has a piece", self.peer.addr);
+                self.handle_have()?;
             }
 
             5 => {
                 println!("{} sent bitfield", self.peer.addr);
-                todo!("implement bitfield parsing");
+                self.handle_bitfield().await?;
             }
 
             6 => {
@@ -158,6 +163,49 @@ impl PeerConnection {
         Ok(())
     }
 
+    fn handle_have(&mut self) -> anyhow::Result<()> {
+        if self.msg_buf.len() < 5 { return Ok (()); }
+
+        let piece_index_network_order: [u8; 4] = self.msg_buf[1..5]
+        .try_into()?;
+
+        let piece_index = u32::from_be_bytes(piece_index_network_order) as usize;
+        println!("{} has piece: {}", self.peer.addr, piece_index);
+
+        self.bitfield[piece_index] = true;
+
+        Ok(())
+    }
+
+    async fn handle_bitfield(&mut self) -> anyhow::Result<()> {
+        // Scoped lock
+        let has_piece_we_need = {
+            let pm = self.piece_manager.lock().await;
+            let num_pieces = pm.num_pieces;
+
+            self.bitfield.resize(num_pieces, false);
+
+            // set bitfield
+            for (i, &byte) in self.msg_buf[1..].iter().enumerate() {
+                for bit in 0..8 {
+                    let piece_index = i * 8 + bit;
+                    if piece_index >= self.bitfield.len() { break; }
+                    self.bitfield[piece_index] = (byte & (1 << (7 - bit))) != 0;
+                }
+            } 
+
+            // check if peer has any piece we need
+            !self.am_interested && pm.peer_has_piece_we_dont(&self.bitfield)
+        };
+
+        if has_piece_we_need {
+            self.am_interested = true;
+            self.send_interested().await?;
+        }
+
+        Ok(())
+    }
+
     async fn send_interested(&mut self) -> anyhow::Result<()> {
         let mut buf = [0u8; 5];
         buf[..4].copy_from_slice(&1u32.to_be_bytes());
@@ -165,5 +213,6 @@ impl PeerConnection {
         self.stream.write_all(&buf).await?;
         Ok(())
     }
+
 }
 
