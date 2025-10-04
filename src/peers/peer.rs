@@ -7,10 +7,13 @@ use serde_bencode::{de, value::Value};
 pub struct PeerDict {
     pub ip: String,
     pub port: u16,
+    #[serde(rename = "peer id")]
+    pub peer_id: String,
 }
 
 pub struct Peer {
     pub addr: std::net::SocketAddr,
+    pub peer_id: Option<String>,
     pub downloaded: u64,
     pub uploaded: u64,
     pub left: u64,
@@ -20,6 +23,7 @@ impl Peer {
     pub fn new(addr: std::net::SocketAddr) -> Self {
         Self {
             addr,
+            peer_id: None,
             downloaded: 0,
             uploaded: 0,
             left: 0,
@@ -43,7 +47,7 @@ pub fn parse_peers(value: &Value) -> Vec<SocketAddr> {
         Value::List(list) => {
             // dictionary peers
             list.iter().filter_map(|item| {
-                if let Value::Dict(dict) = item {
+                if let Value::Dict(dict     ) = item {
                     // extract "ip" as bytes
                     let ip_bytes = dict.get(&b"ip".to_vec())?;
                     let ip_str = if let Value::Bytes(b) = ip_bytes {

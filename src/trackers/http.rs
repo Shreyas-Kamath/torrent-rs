@@ -1,10 +1,13 @@
+use std::net::SocketAddr;
+
 use crate::trackers::TrackerResponse;
+use crate::peers::parse_peers;
 
 use super::Tracker;
 
 use anyhow::Result;
 use async_trait::async_trait;
-use url::{Url, form_urlencoded};
+use url::{form_urlencoded::{self, parse}, Url};
 
 pub struct HttpTracker {
     pub url: String,
@@ -15,21 +18,19 @@ pub struct HttpTracker {
 impl Tracker for HttpTracker {
     async fn announce(&self, info_hash: &[u8]) -> Result<TrackerResponse> {
         println!("Announcing to HTTP tracker at {}", self.url);
-        let mut url = Url::parse(&self.url)?;
         let encoded_info_hash: String = form_urlencoded::byte_serialize(info_hash).collect();
 
-        url.query_pairs_mut()
-            .append_pair("info_hash", &encoded_info_hash)
-            .append_pair("peer_id", "-TR2940-123456789012") // Example peer ID
-            .append_pair("port", "6881") // Example port
-            .append_pair("uploaded", "0")
-            .append_pair("downloaded", "0")
-            .append_pair("left", "0")
-            .append_pair("compact", "1");
+        let url = format!(
+            "{}?info_hash={}&peer_id={}&port={}&uploaded=0&downloaded=0&left=0&compact=1&event=started",
+            self.url,
+            encoded_info_hash,
+            "-TR1012-123456789012",
+            6881
+        );
 
         let response_bytes = self.client.get(url).send().await?.bytes().await?;
 
-        Ok(serde_bencode::from_bytes(&response_bytes)?)
+        Ok(serde_bencode::from_bytes::<TrackerResponse>(&response_bytes)?)
     }
 
     fn url(&self) -> &str {
