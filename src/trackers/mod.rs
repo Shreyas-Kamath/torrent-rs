@@ -16,6 +16,6 @@ pub trait Tracker {
 
 #[derive(Deserialize, Debug)]
 pub struct TrackerResponse {
-    pub interval: u64,
+    pub interval: Option<u64>,
     pub peers: serde_bencode::value::Value,
 }

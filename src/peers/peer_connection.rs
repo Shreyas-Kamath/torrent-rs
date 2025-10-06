@@ -5,6 +5,8 @@ use anyhow::Ok;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::Mutex;
 
+const BLOCK_SIZE: usize = 16384;
+
 pub struct PeerConnection {
     peer: Peer,
     stream: tokio::net::TcpStream,
@@ -23,14 +25,18 @@ pub struct PeerConnection {
     peer_choked: bool,
     am_interested: bool,
 
-    piece_manager: Arc<Mutex<PieceManager>>
+    piece_manager: Arc<Mutex<PieceManager>>,
 }
 
 impl PeerConnection {
     pub async fn new(peer_addr: std::net::SocketAddr, info_hash: Arc<Vec<u8>>, pm: Arc<Mutex<PieceManager>>) -> anyhow::Result<Self> {
         let peer = Peer::new(peer_addr);
         let stream = tokio::net::TcpStream::connect(peer_addr).await?;
-        let bitfield = vec![];
+        let num_pieces = {
+            pm.lock().await.num_pieces
+        };
+        let bitfield = vec![false; num_pieces];
+
         let in_flight_blocks = 0;
         let peer_id: String = String::from("-TR1012-123456789012");
 
@@ -109,13 +115,13 @@ impl PeerConnection {
         match self.msg_buf[0] {
             0 => {
                 self.am_choked = true;
-                println!("{} choked us", self.peer.addr);
+                // println!("{} choked us", self.peer.addr);
             }
 
             1 => {
                 self.am_choked = false;
-                println!("{} unchoked us", self.peer.addr);
-                if self.am_choked { todo!("implement requests"); }
+                // println!("{} unchoked us", self.peer.addr);
+                if self.am_interested { self.maybe_request_next().await?; }
             }
 
             2 => {
@@ -129,8 +135,8 @@ impl PeerConnection {
             }
 
             4 => {
-                println!("{} has a piece", self.peer.addr);
-                self.handle_have()?;
+                // println!("{} has a piece", self.peer.addr);
+                self.handle_have().await?;
             }
 
             5 => {
@@ -144,8 +150,7 @@ impl PeerConnection {
             }
 
             7 => {
-                println!("{} sent a piece", self.peer.addr);
-                todo!("handle piece");
+                self.handle_piece().await?;
             }
 
             8 => {
@@ -163,16 +168,31 @@ impl PeerConnection {
         Ok(())
     }
 
-    fn handle_have(&mut self) -> anyhow::Result<()> {
+    async fn handle_have(&mut self) -> anyhow::Result<()> {
         if self.msg_buf.len() < 5 { return Ok (()); }
 
         let piece_index_network_order: [u8; 4] = self.msg_buf[1..5]
         .try_into()?;
 
         let piece_index = u32::from_be_bytes(piece_index_network_order) as usize;
-        println!("{} has piece: {}", self.peer.addr, piece_index);
+        // println!("{} has piece: {}", self.peer.addr, piece_index);
 
         self.bitfield[piece_index] = true;
+
+        self.maybe_request_next().await?;
+        Ok(())
+    }
+
+    async fn handle_piece(&self) -> anyhow::Result<()> {
+        if self.msg_buf.len() < 9 { return Ok(()) }
+
+        let piece_index = u32::from_be_bytes(self.msg_buf[1..5].try_into()?) as usize;
+        let begin = u32::from_be_bytes(self.msg_buf[5..9].try_into()?) as usize;
+        let block_data = &self.msg_buf[9..];
+
+        // println!("Received piece {piece_index}, begin: {begin}, length: {}", block_data.len());
+        let mut pm = self.piece_manager.lock().await;
+        pm.add_block(piece_index, begin, block_data)?;
 
         Ok(())
     }
@@ -181,9 +201,6 @@ impl PeerConnection {
         // Scoped lock
         let has_piece_we_need = {
             let pm = self.piece_manager.lock().await;
-            let num_pieces = pm.num_pieces;
-
-            self.bitfield.resize(num_pieces, false);
 
             // set bitfield
             for (i, &byte) in self.msg_buf[1..].iter().enumerate() {
@@ -203,6 +220,7 @@ impl PeerConnection {
             self.send_interested().await?;
         }
 
+        self.maybe_request_next().await?;
         Ok(())
     }
 
@@ -210,6 +228,42 @@ impl PeerConnection {
         let mut buf = [0u8; 5];
         buf[..4].copy_from_slice(&1u32.to_be_bytes());
         buf[4] = 2; // message ID = interested
+        self.stream.write_all(&buf).await?;
+        Ok(())
+    }
+
+    async fn maybe_request_next(&mut self) -> anyhow::Result<()> {
+        while !self.am_choked {
+            let next = {
+                let mut pm = self.piece_manager.lock().await;
+                pm.next_piece(&self.bitfield)
+            };
+
+            if let Some((index, curr_len)) = next? {
+                let mut offset: usize = 0;
+                // println!("piece {} requested", index);
+                while offset < curr_len {
+                    let req_len = BLOCK_SIZE.min(curr_len - offset);
+                    self.send_request(index, offset, req_len).await?;
+                    offset += req_len;
+                }
+            }
+            else { break; }
+        }
+        Ok(())
+    }
+
+    async fn send_request(&mut self, piece_index: usize, begin: usize, length: usize) -> anyhow::Result<()> {
+
+        // println!("{piece_index}, begin: {begin}, length: {length} requested");
+
+        let mut buf = Vec::with_capacity(17);
+        buf.extend_from_slice(&(13u32.to_be_bytes()));   // length prefix
+        buf.push(6u8);                                   // message ID (request)
+        buf.extend_from_slice(&(piece_index as u32).to_be_bytes()); 
+        buf.extend_from_slice(&(begin as u32).to_be_bytes()); 
+        buf.extend_from_slice(&(length as u32).to_be_bytes()); 
+        
         self.stream.write_all(&buf).await?;
         Ok(())
     }

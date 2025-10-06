@@ -11,7 +11,7 @@ mod pieces;
 use trackers::{Tracker, HttpTracker, TrackerResponse};
 use peers::{parse_peers, PeerConnection};
 
-use crate::pieces::piece_manager::PieceManager;
+use crate::pieces::{file_manager::FileManager, piece_manager::PieceManager};
 
 type PeerPool = Arc<Mutex<HashSet<SocketAddr>>>;
 
@@ -45,19 +45,20 @@ async fn run_tracker(
             }
         }
         
-        sleep(Duration::from_secs(resp.interval)).await;
+        sleep(Duration::from_secs(resp.interval.unwrap_or(120))).await;
     }
 }
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    let torrent = torrent::load_torrent("torrents/Multiple-InstanceLearningofReal-ValuedData.pdf-936a92932c01c3f5e9994ae8bd2115f4ccb4adc9.torrent")?;
+    let torrent = torrent::load_torrent("torrents/ml-005-e8b1f9c5bf555fe58bc73addb83457dd6da69630.torrent")?;
     let info_bytes = serde_bencode::to_bytes(&torrent.info)?;
     let info_hash: [u8; 20] = sha1::Sha1::digest(&info_bytes).into();
     let info_hash_vec = Arc::new(info_hash.to_vec());
 
     let peer_pool: PeerPool = Arc::new(Mutex::new(HashSet::new()));
 
-    let pm = Arc::new(Mutex::new(PieceManager::new(torrent.info.piece_length, torrent.total_length(), &torrent.info.pieces)));
+    let fm = FileManager::new(&torrent.info)?;
+    let pm = Arc::new(Mutex::new(PieceManager::new(torrent.info.piece_length, torrent.total_length(), &torrent.info.pieces, fm)));
 
     let tracker_objs: Vec<Box<dyn Tracker + Send + Sync>> = torrent
         .announce_list
