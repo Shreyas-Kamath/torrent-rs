@@ -2,11 +2,17 @@ use sha1::{self, Digest};
 
 use crate::pieces::file_manager::FileManager;
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum BlockState {
+    NotRequested,
+    Requested,
+    Received,
+}
+
 pub struct Piece {
     index: usize,
     data: Vec<u8>,
-    block_received: Vec<bool>,
-    block_requested: Vec<bool>,
+    block_status: Vec<BlockState>,
     bytes_written: u32,
     is_complete: bool,
 }
@@ -16,8 +22,7 @@ impl Piece {
         if self.data.is_empty() {
             let num_blocks = (piece_len + block_size - 1) / block_size;
             self.data = vec![0u8; piece_len];
-            self.block_requested = vec![false; num_blocks];
-            self.block_received = vec![false; num_blocks];
+            self.block_status = vec![BlockState::NotRequested; num_blocks];
         }
     }
 }
@@ -54,8 +59,7 @@ impl PieceManager {
             .map(|i| Piece {
                 index: i,
                 data: Vec::new(),
-                block_received: Vec::new(),
-                block_requested: Vec::new(),
+                block_status: Vec::new(),
                 bytes_written: 0,
                 is_complete: false,
             })
@@ -88,15 +92,18 @@ impl PieceManager {
         false
     }
 
-    pub fn next_piece(&mut self, bitfield: &[bool]) -> anyhow::Result<Option<(usize, usize)>> {
+    pub fn next_block(&mut self, bitfield: &[bool]) -> anyhow::Result<Option<(usize, usize, usize)>> {
         for id in 0..self.pieces.len() {
-            if !self.pieces[id].is_complete {
+            if !self.pieces[id].is_complete && bitfield[id] {
                 let curr_len = self.piece_length_of_index(id);
                 self.pieces[id].maybe_init(curr_len, BLOCK_SIZE);
                 
-                if bitfield[id] && self.pieces[id].block_requested.iter().all(|b| !(*b)) {
-                    self.pieces[id].block_requested.fill(true);
-                    return Ok(Some((id, curr_len)));
+                for (block_index, state) in self.pieces[id].block_status.iter_mut().enumerate() {
+                    if *state == BlockState::NotRequested {
+                        *state = BlockState::Requested; 
+                        let offset = block_index * BLOCK_SIZE;
+                        return Ok(Some((id, offset, curr_len)));
+                    }
                 }
             }
         }
@@ -112,12 +119,10 @@ impl PieceManager {
         let piece = &mut self.pieces[piece_index];
 
         let block_index = begin / BLOCK_SIZE;
-        if !piece.block_received[block_index] {
-            piece.data[begin..begin + block_data.len()].copy_from_slice(block_data);
-            piece.block_received[block_index] = true;
-        }
+        piece.data[begin..begin + block_data.len()].copy_from_slice(block_data);
+        piece.block_status[block_index] = BlockState::Received;
 
-        let all_received = piece.block_received.iter().all(|&b| b);
+        let all_received = piece.block_status.iter().all(|b| *b == BlockState::Received);
         if all_received && !piece.is_complete {
             let hash_matches = {
                 let data_slice = &piece.data;
@@ -137,14 +142,11 @@ impl PieceManager {
                         eprintln!("Failed to send {} to disk: {:?}", piece_index, e);
                     }
                 });
-                piece.block_received.clear();
-                piece.block_received.shrink_to_fit();
-                piece.block_requested.clear();
-                piece.block_requested.shrink_to_fit();
+                piece.block_status.clear();
+                piece.block_status.shrink_to_fit();
             } else {
                 // reset the blocks so they can be requested again
-                piece.block_received.fill(false);
-                piece.block_requested.fill(false);
+                piece.block_status.fill(BlockState::NotRequested);
                 piece.is_complete = false;
                 println!("Piece {piece_index} failed hash, will retry.");
             }

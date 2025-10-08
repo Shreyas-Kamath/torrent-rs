@@ -6,13 +6,13 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::Mutex;
 
 const BLOCK_SIZE: usize = 16384;
+const MAX_OUTGOING: u8 = 255;
 
 pub struct PeerConnection {
     peer: Peer,
     stream: tokio::net::TcpStream,
     bitfield: Vec<bool>,
     info_hash: Arc<Vec<u8>>,
-    in_flight_blocks: u32,
     peer_id: String,
 
     // buffers
@@ -25,6 +25,7 @@ pub struct PeerConnection {
     peer_choked: bool,
     am_interested: bool,
 
+    in_flight: u8,
     piece_manager: Arc<Mutex<PieceManager>>,
 }
 
@@ -37,7 +38,6 @@ impl PeerConnection {
         };
         let bitfield = vec![false; num_pieces];
 
-        let in_flight_blocks = 0;
         let peer_id: String = String::from("-TR1012-123456789012");
 
         Ok(PeerConnection {
@@ -45,7 +45,6 @@ impl PeerConnection {
             stream,
             bitfield,
             info_hash,
-            in_flight_blocks,
             peer_id,
             length_buf: [0; 4],
             msg_buf: Vec::new(),
@@ -53,6 +52,7 @@ impl PeerConnection {
             am_choked: true,
             peer_choked: true,
             am_interested: false,
+            in_flight: 0,
             piece_manager: pm.clone(),
         })
     }
@@ -183,17 +183,21 @@ impl PeerConnection {
         Ok(())
     }
 
-    async fn handle_piece(&self) -> anyhow::Result<()> {
+    async fn handle_piece(&mut self) -> anyhow::Result<()> {
         if self.msg_buf.len() < 9 { return Ok(()) }
 
+        self.in_flight -= 1;
         let piece_index = u32::from_be_bytes(self.msg_buf[1..5].try_into()?) as usize;
         let begin = u32::from_be_bytes(self.msg_buf[5..9].try_into()?) as usize;
         let block_data = &self.msg_buf[9..];
 
         // println!("Received piece {piece_index}, begin: {begin}, length: {}", block_data.len());
-        let mut pm = self.piece_manager.lock().await;
-        pm.add_block(piece_index, begin, block_data)?;
+        let _ = {
+            let mut pm = self.piece_manager.lock().await;
+            pm.add_block(piece_index, begin, block_data)?;
+        };
 
+        // self.maybe_request_next().await?;
         Ok(())
     }
 
@@ -233,29 +237,30 @@ impl PeerConnection {
     }
 
     async fn maybe_request_next(&mut self) -> anyhow::Result<()> {
-        while !self.am_choked {
-            let next = {
+       loop {
+            if self.am_choked {
+               return Ok(());
+            }
+
+            let next_block = {
                 let mut pm = self.piece_manager.lock().await;
-                pm.next_piece(&self.bitfield)
+                pm.next_block(&self.bitfield)?
             };
 
-            if let Some((index, curr_len)) = next? {
-                let mut offset: usize = 0;
-                // println!("piece {} requested", index);
-                while offset < curr_len {
-                    let req_len = BLOCK_SIZE.min(curr_len - offset);
-                    self.send_request(index, offset, req_len).await?;
-                    offset += req_len;
-                }
-            }
-            else { break; }
+            let (piece_index, begin, curr_len) = match next_block {
+                Some(b) => b,
+                None => return Ok(()),
+            };
+
+            let req_len = (curr_len - begin).min(BLOCK_SIZE);
+
+            self.send_request(piece_index, begin, req_len).await?;
+            // self.in_flight += 1;
         }
-        Ok(())
+
     }
 
     async fn send_request(&mut self, piece_index: usize, begin: usize, length: usize) -> anyhow::Result<()> {
-
-        // println!("{piece_index}, begin: {begin}, length: {length} requested");
 
         let mut buf = Vec::with_capacity(17);
         buf.extend_from_slice(&(13u32.to_be_bytes()));   // length prefix

@@ -50,7 +50,7 @@ async fn run_tracker(
 }
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    let torrent = torrent::load_torrent("torrents/ml-005-e8b1f9c5bf555fe58bc73addb83457dd6da69630.torrent")?;
+    let torrent = torrent::load_torrent("torrents/CSVFILES-0f97ce1fa054ad5269bd675e3ad9ad599cd67e66.torrent")?;
     let info_bytes = serde_bencode::to_bytes(&torrent.info)?;
     let info_hash: [u8; 20] = sha1::Sha1::digest(&info_bytes).into();
     let info_hash_vec = Arc::new(info_hash.to_vec());
@@ -81,7 +81,7 @@ async fn main() -> anyhow::Result<()> {
         });
     }
 
-    // Optional: monitor peer pool
+    // monitor peer pool
     loop {
         {
             let pool = peer_pool.lock().await;
